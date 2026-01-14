@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 import { ApiClient } from '@/api/api';
+import type { ApiSessionClient } from '@/api/apiSession';
 import { logger } from '@/ui/logger';
 import { Credentials, readSettings } from '@/persistence';
 import { initialMachineMetadata } from '@/daemon/run';
@@ -14,10 +15,12 @@ import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
 import { createSessionMetadata } from '@/utils/createSessionMetadata';
 import { connectionState } from '@/utils/serverConnectionErrors';
+import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import { codexLoop } from './loop';
 import type { CodexMode, PermissionMode } from './mode';
 import { extractResumeSessionId } from './utils/resume';
 import { ensureHappySessionTagForCodexSession, getHappySessionTagForCodexSession } from './utils/codexSessionMap';
+import type { SessionController } from './sessionController';
 export { emitReadyIfIdle } from './utils/ready';
 export type { CodexMode, PermissionMode } from './mode';
 
@@ -86,6 +89,33 @@ export async function runCodex(opts: {
     const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
     logger.debug(`Session created: ${response?.id ?? 'offline'}`);
 
+    let session: ApiSessionClient;
+    const sessionSwapListeners = new Set<(nextSession: ApiSessionClient) => void>();
+    const sessionController: SessionController = {
+        getSession: () => session,
+        onSessionSwap: (listener) => {
+            sessionSwapListeners.add(listener);
+            return () => {
+                sessionSwapListeners.delete(listener);
+            };
+        },
+    };
+
+    const { session: initialSession, reconnectionHandle } = setupOfflineReconnection({
+        api,
+        sessionTag,
+        metadata,
+        state,
+        response,
+        onSessionSwap: (newSession) => {
+            session = newSession;
+            for (const listener of sessionSwapListeners) {
+                listener(newSession);
+            }
+        },
+    });
+    session = initialSession;
+
     // Always report to daemon if it exists (skip if offline)
     if (response) {
         try {
@@ -100,9 +130,6 @@ export async function runCodex(opts: {
             logger.debug('[START] Failed to report to daemon (may not be running):', error);
         }
     }
-
-    // Create realtime session
-    const session = api.sessionSyncClient(response);
 
     // Start Happy MCP server
     const happyServer = await startHappyServer(session);
@@ -134,47 +161,55 @@ export async function runCodex(opts: {
     // Forward messages to queue
     let currentPermissionMode: PermissionMode | undefined = undefined;
     let currentModel: string | undefined = undefined;
-    session.onUserMessage((message) => {
-        let messagePermissionMode = currentPermissionMode;
-        if (message.meta?.permissionMode) {
-            const validModes: PermissionMode[] = ['default', 'read-only', 'safe-yolo', 'yolo'];
-            if (validModes.includes(message.meta.permissionMode as PermissionMode)) {
-                messagePermissionMode = message.meta.permissionMode as PermissionMode;
-                currentPermissionMode = messagePermissionMode;
-                logger.debug(`[Codex] Permission mode updated from user message to: ${currentPermissionMode}`);
+    const attachMessageHandler = (currentSession: ApiSessionClient) => {
+        currentSession.onUserMessage((message) => {
+            let messagePermissionMode = currentPermissionMode;
+            if (message.meta?.permissionMode) {
+                const validModes: PermissionMode[] = ['default', 'read-only', 'safe-yolo', 'yolo'];
+                if (validModes.includes(message.meta.permissionMode as PermissionMode)) {
+                    messagePermissionMode = message.meta.permissionMode as PermissionMode;
+                    currentPermissionMode = messagePermissionMode;
+                    logger.debug(`[Codex] Permission mode updated from user message to: ${currentPermissionMode}`);
+                } else {
+                    logger.debug(`[Codex] Invalid permission mode received: ${message.meta.permissionMode}`);
+                }
             } else {
-                logger.debug(`[Codex] Invalid permission mode received: ${message.meta.permissionMode}`);
+                logger.debug(`[Codex] User message received with no permission mode override, using current: ${currentPermissionMode ?? 'default (effective)'}`);
             }
-        } else {
-            logger.debug(`[Codex] User message received with no permission mode override, using current: ${currentPermissionMode ?? 'default (effective)'}`);
-        }
 
-        let messageModel = currentModel;
-        if (message.meta?.hasOwnProperty('model')) {
-            messageModel = message.meta.model || undefined;
-            currentModel = messageModel;
-            logger.debug(`[Codex] Model updated from user message: ${messageModel || 'reset to default'}`);
-        } else {
-            logger.debug(`[Codex] User message received with no model override, using current: ${currentModel || 'default'}`);
-        }
+            let messageModel = currentModel;
+            if (message.meta?.hasOwnProperty('model')) {
+                messageModel = message.meta.model || undefined;
+                currentModel = messageModel;
+                logger.debug(`[Codex] Model updated from user message: ${messageModel || 'reset to default'}`);
+            } else {
+                logger.debug(`[Codex] User message received with no model override, using current: ${currentModel || 'default'}`);
+            }
 
-        const enhancedMode: CodexMode = {
-            permissionMode: messagePermissionMode || 'default',
-            model: messageModel,
-        };
-        messageQueue.push(message.content.text, enhancedMode);
+            const enhancedMode: CodexMode = {
+                permissionMode: messagePermissionMode || 'default',
+                model: messageModel,
+            };
+            messageQueue.push(message.content.text, enhancedMode);
+        });
+    };
+
+    attachMessageHandler(session);
+    sessionController.onSessionSwap((nextSession) => {
+        attachMessageHandler(nextSession);
     });
 
     // Keep-alive tracking
     let thinking = false;
-    const sendKeepAlive = () => session.keepAlive(thinking, mode);
+    const sendKeepAlive = () => sessionController.getSession().keepAlive(thinking, mode);
     sendKeepAlive();
     const keepAliveInterval = setInterval(() => sendKeepAlive(), 2000);
 
     const onModeChange = (newMode: 'local' | 'remote') => {
         mode = newMode;
-        session.sendSessionEvent({ type: 'switch', mode: newMode });
-        session.updateAgentState((currentState) => ({
+        const activeSession = sessionController.getSession();
+        activeSession.sendSessionEvent({ type: 'switch', mode: newMode });
+        activeSession.updateAgentState((currentState) => ({
             ...currentState,
             controlledByUser: newMode === 'local',
         }));
@@ -197,13 +232,17 @@ export async function runCodex(opts: {
             process.exit(0);
         }, 2000);
         try {
-            session.sendSessionDeath();
-            await session.flush();
-            await session.close();
+            const activeSession = sessionController.getSession();
+            activeSession.sendSessionDeath();
+            await activeSession.flush();
+            await activeSession.close();
         } catch (error) {
             logger.debug('[CODEX] Error during cleanup:', error);
         }
 
+        if (reconnectionHandle) {
+            reconnectionHandle.cancel();
+        }
         stopCaffeinate();
         happyServer.stop();
         clearInterval(keepAliveInterval);
@@ -227,7 +266,13 @@ export async function runCodex(opts: {
         cleanup();
     });
 
-    registerKillSessionHandler(session.rpcHandlerManager, cleanup);
+    const attachKillHandler = (currentSession: ApiSessionClient) => {
+        registerKillSessionHandler(currentSession.rpcHandlerManager, cleanup);
+    };
+    attachKillHandler(session);
+    sessionController.onSessionSwap((nextSession) => {
+        attachKillHandler(nextSession);
+    });
 
     // Start codex loop
     await codexLoop({
@@ -236,7 +281,7 @@ export async function runCodex(opts: {
         resumeArgs: opts.resumeArgs,
         resumeSessionId: resumeSessionId ?? undefined,
         sessionTag,
-        session,
+        sessionController,
         api,
         mcpServers,
         messageQueue,

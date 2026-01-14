@@ -1,13 +1,13 @@
 import { spawn } from 'node:child_process';
 import type { UUID } from 'node:crypto';
 
-import { ApiSessionClient } from '@/api/apiSession';
 import { logger } from '@/ui/logger';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import type { CodexMode } from './mode';
 import { createCodexRolloutScanner, findLatestCodexRolloutForCwd, findSessionFileById } from './utils/rolloutScanner';
 import { extractResumeSessionId } from './utils/resume';
 import { ensureHappySessionTagForCodexSession } from './utils/codexSessionMap';
+import type { SessionController } from './sessionController';
 
 export type CodexLocalReason = 'switch' | 'exit';
 
@@ -17,7 +17,7 @@ export interface CodexLocalResult {
 }
 
 export interface CodexLocalOptions {
-    session: ApiSessionClient;
+    sessionController: SessionController;
     path: string;
     resumeArgs?: string[];
     resumeSessionId?: string;
@@ -27,6 +27,9 @@ export interface CodexLocalOptions {
 
 export async function codexLocalLauncher(opts: CodexLocalOptions): Promise<CodexLocalResult> {
     logger.debug('[codex-local] Starting local launcher');
+
+    const { getSession, onSessionSwap } = opts.sessionController;
+    let session = getSession();
 
     let lastRolloutFile: string | null = null;
     const resumeSessionId = opts.resumeSessionId ?? extractResumeSessionId(opts.resumeArgs);
@@ -47,9 +50,15 @@ export async function codexLocalLauncher(opts: CodexLocalOptions): Promise<Codex
             }
         },
         onCodexMessage: (message) => {
-            opts.session.sendCodexMessage(message);
+            session.sendCodexMessage(message);
         },
     });
+
+    const bindSession = (nextSession: typeof session) => {
+        session = nextSession;
+        session.rpcHandlerManager.registerHandler('abort', doAbort);
+        session.rpcHandlerManager.registerHandler('switch', doSwitch);
+    };
 
     let exitReason: CodexLocalReason | null = null;
     const processAbortController = new AbortController();
@@ -86,21 +95,22 @@ export async function codexLocalLauncher(opts: CodexLocalOptions): Promise<Codex
         void doSwitch();
     });
 
-    // RPC handlers
-    opts.session.rpcHandlerManager.registerHandler('abort', doAbort);
-    opts.session.rpcHandlerManager.registerHandler('switch', doSwitch);
+    bindSession(session);
+    const unsubscribe = onSessionSwap((nextSession) => {
+        bindSession(nextSession);
+    });
 
     // If messages already queued, switch immediately
-    if (opts.messageQueue.size() > 0) {
-        await scanner.cleanup();
-        if (!lastRolloutFile) {
-            lastRolloutFile = await findLatestCodexRolloutForCwd(opts.path, opts.resumeArgs?.includes('--all') ?? false);
+        if (opts.messageQueue.size() > 0) {
+            await scanner.cleanup();
+            if (!lastRolloutFile) {
+                lastRolloutFile = await findLatestCodexRolloutForCwd(opts.path, opts.resumeArgs?.includes('--all') ?? false);
+            }
+            opts.messageQueue.setOnMessage(null);
+            session.rpcHandlerManager.registerHandler('abort', async () => { });
+            session.rpcHandlerManager.registerHandler('switch', async () => { });
+            return { reason: 'switch', resumeFile: lastRolloutFile };
         }
-        opts.messageQueue.setOnMessage(null);
-        opts.session.rpcHandlerManager.registerHandler('abort', async () => { });
-        opts.session.rpcHandlerManager.registerHandler('switch', async () => { });
-        return { reason: 'switch', resumeFile: lastRolloutFile };
-    }
 
     try {
         let nextArgs = opts.resumeArgs;
@@ -149,8 +159,9 @@ export async function codexLocalLauncher(opts: CodexLocalOptions): Promise<Codex
     } finally {
         childExit = null;
         opts.messageQueue.setOnMessage(null);
-        opts.session.rpcHandlerManager.registerHandler('abort', async () => { });
-        opts.session.rpcHandlerManager.registerHandler('switch', async () => { });
+        session.rpcHandlerManager.registerHandler('abort', async () => { });
+        session.rpcHandlerManager.registerHandler('switch', async () => { });
+        unsubscribe();
         await scanner.cleanup();
     }
     if (!lastRolloutFile) {

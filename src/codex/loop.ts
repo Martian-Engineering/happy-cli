@@ -1,11 +1,11 @@
 import { ApiClient } from '@/api/api';
-import { ApiSessionClient } from '@/api/apiSession';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { logger } from '@/ui/logger';
 import { codexLocalLauncher } from './codexLocalLauncher';
 import { codexRemoteLauncher } from './codexRemoteLauncher';
 import type { CodexMode } from './mode';
 import type { UUID } from 'node:crypto';
+import type { SessionController } from './sessionController';
 
 export type ControlMode = 'local' | 'remote';
 
@@ -15,7 +15,7 @@ export interface CodexLoopOptions {
     resumeArgs?: string[];
     resumeSessionId?: string;
     sessionTag?: UUID;
-    session: ApiSessionClient;
+    sessionController: SessionController;
     api: ApiClient;
     mcpServers: Record<string, any>;
     messageQueue: MessageQueue2<CodexMode>;
@@ -34,7 +34,7 @@ export async function codexLoop(opts: CodexLoopOptions) {
 
         if (mode === 'local') {
             const result = await codexLocalLauncher({
-                session: opts.session,
+                sessionController: opts.sessionController,
                 path: opts.path,
                 resumeArgs,
                 resumeSessionId,
@@ -57,7 +57,7 @@ export async function codexLoop(opts: CodexLoopOptions) {
 
         if (mode === 'remote') {
             const remoteResult = await codexRemoteLauncher({
-                session: opts.session,
+                sessionController: opts.sessionController,
                 api: opts.api,
                 messageQueue: opts.messageQueue,
                 mcpServers: opts.mcpServers,

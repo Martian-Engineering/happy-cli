@@ -4,7 +4,6 @@ import { randomUUID } from 'node:crypto';
 import type { UUID } from 'node:crypto';
 
 import { ApiClient } from '@/api/api';
-import { ApiSessionClient } from '@/api/apiSession';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { logger } from '@/ui/logger';
 import { CodexMcpClient } from './codexMcpClient';
@@ -19,9 +18,10 @@ import { CHANGE_TITLE_INSTRUCTION } from '@/gemini/constants';
 import { RemoteModeDisplay } from '@/ui/ink/RemoteModeDisplay';
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
 import { ensureHappySessionTagForCodexSession } from './utils/codexSessionMap';
+import type { SessionController } from './sessionController';
 
 export async function codexRemoteLauncher(opts: {
-    session: ApiSessionClient;
+    sessionController: SessionController;
     api: ApiClient;
     messageQueue: MessageQueue2<CodexMode>;
     mcpServers: Record<string, any>;
@@ -32,7 +32,9 @@ export async function codexRemoteLauncher(opts: {
 }): Promise<{ reason: 'switch' | 'exit'; resumeArgs?: string[] }> {
     logger.debug('[codex-remote] Starting remote launcher');
 
-    const { session, api, messageQueue, mcpServers, onThinkingChange } = opts;
+    const { api, messageQueue, mcpServers, onThinkingChange } = opts;
+    const { getSession, onSessionSwap } = opts.sessionController;
+    let session = getSession();
 
     // Configure terminal
     const hasTTY = process.stdout.isTTY && process.stdin.isTTY;
@@ -79,10 +81,10 @@ export async function codexRemoteLauncher(opts: {
     const client = new CodexMcpClient();
     const permissionHandler = new CodexPermissionHandler(session);
     const reasoningProcessor = new ReasoningProcessor((message) => {
-        session.sendCodexMessage(message);
+        getSession().sendCodexMessage(message);
     });
     const diffProcessor = new DiffProcessor((message) => {
-        session.sendCodexMessage(message);
+        getSession().sendCodexMessage(message);
     });
 
     client.setPermissionHandler(permissionHandler);
@@ -109,9 +111,10 @@ export async function codexRemoteLauncher(opts: {
     };
 
     const sendReady = () => {
-        session.sendSessionEvent({ type: 'ready' });
+        const activeSession = getSession();
+        activeSession.sendSessionEvent({ type: 'ready' });
         try {
-            api.push().sendToAllDevices("It's ready!", 'Codex is waiting for your command', { sessionId: session.sessionId });
+            api.push().sendToAllDevices("It's ready!", 'Codex is waiting for your command', { sessionId: activeSession.sessionId });
         } catch (pushError) {
             logger.debug('[Codex] Failed to send ready push', pushError);
         }
@@ -144,8 +147,17 @@ export async function codexRemoteLauncher(opts: {
         shouldExit = true;
     };
 
-    session.rpcHandlerManager.registerHandler('abort', doAbort);
-    session.rpcHandlerManager.registerHandler('switch', doSwitch);
+    const bindSession = (nextSession: typeof session) => {
+        session = nextSession;
+        permissionHandler.updateSession(nextSession);
+        nextSession.rpcHandlerManager.registerHandler('abort', doAbort);
+        nextSession.rpcHandlerManager.registerHandler('switch', doSwitch);
+    };
+
+    bindSession(session);
+    const unsubscribe = onSessionSwap((nextSession) => {
+        bindSession(nextSession);
+    });
 
     client.setHandler((msg) => {
         logger.debug(`[Codex] MCP message: ${JSON.stringify(msg)}`);
@@ -198,7 +210,7 @@ export async function codexRemoteLauncher(opts: {
             reasoningProcessor.complete(msg.text);
         }
         if (msg.type === 'agent_message') {
-            session.sendCodexMessage({
+            getSession().sendCodexMessage({
                 type: 'message',
                 message: msg.message,
                 id: randomUUID(),
@@ -206,7 +218,7 @@ export async function codexRemoteLauncher(opts: {
         }
         if (msg.type === 'exec_command_begin' || msg.type === 'exec_approval_request') {
             let { call_id, type, ...inputs } = msg;
-            session.sendCodexMessage({
+            getSession().sendCodexMessage({
                 type: 'tool-call',
                 name: 'CodexBash',
                 callId: call_id,
@@ -216,7 +228,7 @@ export async function codexRemoteLauncher(opts: {
         }
         if (msg.type === 'exec_command_end') {
             let { call_id, type, ...output } = msg;
-            session.sendCodexMessage({
+            getSession().sendCodexMessage({
                 type: 'tool-call-result',
                 callId: call_id,
                 output: output,
@@ -224,7 +236,7 @@ export async function codexRemoteLauncher(opts: {
             });
         }
         if (msg.type === 'token_count') {
-            session.sendCodexMessage({
+            getSession().sendCodexMessage({
                 ...msg,
                 id: randomUUID(),
             });
@@ -234,7 +246,7 @@ export async function codexRemoteLauncher(opts: {
             const changeCount = Object.keys(changes).length;
             const filesMsg = changeCount === 1 ? '1 file' : `${changeCount} files`;
             messageBuffer.addMessage(`Modifying ${filesMsg}...`, 'tool');
-            session.sendCodexMessage({
+            getSession().sendCodexMessage({
                 type: 'tool-call',
                 name: 'CodexPatch',
                 callId: call_id,
@@ -254,7 +266,7 @@ export async function codexRemoteLauncher(opts: {
                 const errorMsg = stderr || 'Failed to modify files';
                 messageBuffer.addMessage(`Error: ${errorMsg.substring(0, 200)}`, 'result');
             }
-            session.sendCodexMessage({
+            getSession().sendCodexMessage({
                 type: 'tool-call-result',
                 callId: call_id,
                 output: {
@@ -364,12 +376,12 @@ export async function codexRemoteLauncher(opts: {
                 const isAbortError = error instanceof Error && error.name === 'AbortError';
                 if (isAbortError) {
                     messageBuffer.addMessage('Aborted by user', 'status');
-                    session.sendSessionEvent({ type: 'message', message: 'Aborted by user' });
+                    getSession().sendSessionEvent({ type: 'message', message: 'Aborted by user' });
                     wasCreated = false;
                     currentModeHash = null;
                 } else {
                     messageBuffer.addMessage('Process exited unexpectedly', 'status');
-                    session.sendSessionEvent({ type: 'message', message: 'Process exited unexpectedly' });
+                    getSession().sendSessionEvent({ type: 'message', message: 'Process exited unexpectedly' });
                 }
             } finally {
                 permissionHandler.reset();
@@ -386,8 +398,9 @@ export async function codexRemoteLauncher(opts: {
             }
         }
     } finally {
-        session.rpcHandlerManager.registerHandler('abort', async () => { });
-        session.rpcHandlerManager.registerHandler('switch', async () => { });
+        const activeSession = getSession();
+        activeSession.rpcHandlerManager.registerHandler('abort', async () => { });
+        activeSession.rpcHandlerManager.registerHandler('switch', async () => { });
 
         if (hasTTY && process.stdin.isTTY) {
             try { process.stdin.setRawMode(false); } catch { }
@@ -397,6 +410,7 @@ export async function codexRemoteLauncher(opts: {
         }
         inkInstance?.unmount?.();
         await client.disconnect();
+        unsubscribe();
     }
 
     const reason: 'switch' | 'exit' = exitReason === 'switch' ? 'switch' : 'exit';
