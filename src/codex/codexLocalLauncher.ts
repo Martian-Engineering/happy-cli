@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import type { UUID } from 'node:crypto';
 
 import { ApiSessionClient } from '@/api/apiSession';
 import { logger } from '@/ui/logger';
@@ -6,6 +7,7 @@ import { MessageQueue2 } from '@/utils/MessageQueue2';
 import type { CodexMode } from './mode';
 import { createCodexRolloutScanner, findLatestCodexRolloutForCwd, findSessionFileById } from './utils/rolloutScanner';
 import { extractResumeSessionId } from './utils/resume';
+import { ensureHappySessionTagForCodexSession } from './utils/codexSessionMap';
 
 export type CodexLocalReason = 'switch' | 'exit';
 
@@ -19,6 +21,7 @@ export interface CodexLocalOptions {
     path: string;
     resumeArgs?: string[];
     resumeSessionId?: string;
+    sessionTag?: UUID;
     messageQueue: MessageQueue2<CodexMode>;
 }
 
@@ -35,8 +38,13 @@ export async function codexLocalLauncher(opts: CodexLocalOptions): Promise<Codex
         workingDirectory: opts.path,
         allowAll: opts.resumeArgs?.includes('--all') ?? false,
         resumeSessionId: resumeSessionId ?? undefined,
-        onActiveSessionFile: (file) => {
+        onActiveSessionFile: (file, sessionId) => {
             lastRolloutFile = file;
+            if (sessionId && opts.sessionTag) {
+                void ensureHappySessionTagForCodexSession(sessionId, opts.sessionTag).catch((error) => {
+                    logger.debug('[codex-local] Failed to store session tag mapping', error);
+                });
+            }
         },
         onCodexMessage: (message) => {
             opts.session.sendCodexMessage(message);
