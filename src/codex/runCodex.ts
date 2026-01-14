@@ -179,7 +179,16 @@ export async function runCodex(opts: {
         sendKeepAlive();
     };
 
+    let shuttingDown = false;
     const cleanup = async () => {
+        if (shuttingDown) {
+            return;
+        }
+        shuttingDown = true;
+        const forceExitTimer = setTimeout(() => {
+            logger.debug('[CODEX] Force exit after shutdown timeout');
+            process.exit(0);
+        }, 2000);
         try {
             session.sendSessionDeath();
             await session.flush();
@@ -193,6 +202,7 @@ export async function runCodex(opts: {
         clearInterval(keepAliveInterval);
 
         logger.debug('[CODEX] Cleanup complete, exiting');
+        clearTimeout(forceExitTimer);
         process.exit(0);
     };
 
@@ -226,12 +236,5 @@ export async function runCodex(opts: {
         onThinkingChange,
     });
 
-    // Send session death message
-    session.sendSessionDeath();
-    await session.flush();
-    await session.close();
-
-    stopCaffeinate();
-    happyServer.stop();
-    clearInterval(keepAliveInterval);
+    await cleanup();
 }
