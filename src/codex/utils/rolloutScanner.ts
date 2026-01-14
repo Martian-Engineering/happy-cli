@@ -308,7 +308,11 @@ export async function createCodexRolloutScanner(opts: RolloutScannerOptions) {
     }
 }
 
-export async function findLatestCodexRolloutForCwd(workingDirectory: string, allowAll: boolean): Promise<string | null> {
+export async function findLatestCodexRolloutForCwd(
+    workingDirectory: string,
+    allowAll: boolean,
+    opts?: { preferMtime?: boolean }
+): Promise<string | null> {
     const codexHomeDir = process.env.CODEX_HOME || join(os.homedir(), '.codex');
     const sessionsDir = join(codexHomeDir, 'sessions');
     const normalizedCwd = resolve(workingDirectory);
@@ -322,7 +326,9 @@ export async function findLatestCodexRolloutForCwd(workingDirectory: string, all
         if (!allowAll && meta.cwd && resolve(meta.cwd) !== normalizedCwd) {
             continue;
         }
-        const ts = parseRolloutTimestamp(file) ?? (await statSafe(file))?.mtimeMs ?? 0;
+        const ts = opts?.preferMtime
+            ? (await statSafe(file))?.mtimeMs ?? 0
+            : parseRolloutTimestamp(file) ?? (await statSafe(file))?.mtimeMs ?? 0;
         if (!best || ts > best.ts) {
             best = { file, ts };
         }
