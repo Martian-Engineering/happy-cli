@@ -1,6 +1,7 @@
 import { render } from 'ink';
 import React from 'react';
 import { randomUUID } from 'node:crypto';
+import type { UUID } from 'node:crypto';
 
 import { ApiClient } from '@/api/api';
 import { ApiSessionClient } from '@/api/apiSession';
@@ -17,6 +18,7 @@ import { CodexSessionConfig } from './types';
 import { CHANGE_TITLE_INSTRUCTION } from '@/gemini/constants';
 import { RemoteModeDisplay } from '@/ui/ink/RemoteModeDisplay';
 import { MessageBuffer } from '@/ui/ink/messageBuffer';
+import { ensureHappySessionTagForCodexSession } from './utils/codexSessionMap';
 
 export async function codexRemoteLauncher(opts: {
     session: ApiSessionClient;
@@ -26,6 +28,7 @@ export async function codexRemoteLauncher(opts: {
     onThinkingChange: (thinking: boolean) => void;
     resumeFile?: string;
     resumeSessionId?: string;
+    sessionTag?: UUID;
 }): Promise<{ reason: 'switch' | 'exit'; resumeArgs?: string[] }> {
     logger.debug('[codex-remote] Starting remote launcher');
 
@@ -90,6 +93,20 @@ export async function codexRemoteLauncher(opts: {
     let currentModeHash: string | null = null;
     let first = true;
     let turnAbortController = new AbortController();
+    let mappedSessionId: string | null = null;
+
+    const maybeStoreSessionId = (sessionId?: string | null) => {
+        if (!sessionId || !opts.sessionTag) {
+            return;
+        }
+        if (mappedSessionId === sessionId) {
+            return;
+        }
+        mappedSessionId = sessionId;
+        void ensureHappySessionTagForCodexSession(sessionId, opts.sessionTag).catch((error) => {
+            logger.debug('[codex-remote] Failed to store session tag mapping', error);
+        });
+    };
 
     const sendReady = () => {
         session.sendSessionEvent({ type: 'ready' });
@@ -257,6 +274,7 @@ export async function codexRemoteLauncher(opts: {
         if (!activeRolloutFile) {
             const sessionId = client.getSessionId();
             if (sessionId) {
+                maybeStoreSessionId(sessionId);
                 void findSessionFileById(sessionId).then((file) => {
                     if (file) {
                         activeRolloutFile = file;
@@ -333,6 +351,7 @@ export async function codexRemoteLauncher(opts: {
                     if (!activeRolloutFile) {
                         const sessionId = client.getSessionId();
                         if (sessionId) {
+                            maybeStoreSessionId(sessionId);
                             activeRolloutFile = await findSessionFileById(sessionId);
                         }
                     }
@@ -391,6 +410,7 @@ export async function codexRemoteLauncher(opts: {
             }
         }
         if (sessionId) {
+            maybeStoreSessionId(sessionId);
             resumeArgs = ['resume', sessionId];
         } else {
             resumeArgs = ['resume', '--last'];

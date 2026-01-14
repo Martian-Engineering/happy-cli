@@ -5,6 +5,7 @@ import { logger } from '@/ui/logger';
 import { codexLocalLauncher } from './codexLocalLauncher';
 import { codexRemoteLauncher } from './codexRemoteLauncher';
 import type { CodexMode } from './mode';
+import type { UUID } from 'node:crypto';
 
 export type ControlMode = 'local' | 'remote';
 
@@ -13,6 +14,7 @@ export interface CodexLoopOptions {
     startingMode?: ControlMode;
     resumeArgs?: string[];
     resumeSessionId?: string;
+    sessionTag?: UUID;
     session: ApiSessionClient;
     api: ApiClient;
     mcpServers: Record<string, any>;
@@ -36,6 +38,7 @@ export async function codexLoop(opts: CodexLoopOptions) {
                 path: opts.path,
                 resumeArgs,
                 resumeSessionId,
+                sessionTag: opts.sessionTag,
                 messageQueue: opts.messageQueue,
             });
 
@@ -61,6 +64,7 @@ export async function codexLoop(opts: CodexLoopOptions) {
                 onThinkingChange: opts.onThinkingChange,
                 resumeFile,
                 resumeSessionId,
+                sessionTag: opts.sessionTag,
             });
 
             resumeFile = undefined;

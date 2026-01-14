@@ -17,7 +17,7 @@ import { connectionState } from '@/utils/serverConnectionErrors';
 import { codexLoop } from './loop';
 import type { CodexMode, PermissionMode } from './mode';
 import { extractResumeSessionId } from './utils/resume';
-
+import { ensureHappySessionTagForCodexSession, getHappySessionTagForCodexSession } from './utils/codexSessionMap';
 export { emitReadyIfIdle } from './utils/ready';
 export type { CodexMode, PermissionMode } from './mode';
 
@@ -30,7 +30,7 @@ export async function runCodex(opts: {
     logger.debug(`[CODEX] ===== CODEX MODE STARTING =====`);
 
     const workingDirectory = process.cwd();
-    const sessionTag = randomUUID();
+    const sessionTagFallback = randomUUID();
 
     // Set backend for offline warnings (before any API calls)
     connectionState.setBackend('Codex');
@@ -40,6 +40,14 @@ export async function runCodex(opts: {
     // Resolve initial mode
     let mode: 'local' | 'remote' = opts.startingMode ?? (opts.startedBy === 'daemon' ? 'remote' : 'local');
     const resumeSessionId = extractResumeSessionId(opts.resumeArgs);
+    let sessionTag = sessionTagFallback;
+    if (resumeSessionId) {
+        const existingTag = await getHappySessionTagForCodexSession(resumeSessionId);
+        if (existingTag) {
+            sessionTag = existingTag;
+        }
+        sessionTag = await ensureHappySessionTagForCodexSession(resumeSessionId, sessionTag);
+    }
 
     // Validate daemon spawn requirements
     if (opts.startedBy === 'daemon' && mode === 'local') {
@@ -227,6 +235,7 @@ export async function runCodex(opts: {
         startingMode: mode,
         resumeArgs: opts.resumeArgs,
         resumeSessionId: resumeSessionId ?? undefined,
+        sessionTag,
         session,
         api,
         mcpServers,
