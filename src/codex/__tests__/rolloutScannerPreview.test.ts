@@ -124,4 +124,77 @@ describe('rolloutScanner preview sanitization', () => {
             await rm(tmpRoot, { recursive: true, force: true });
         }
     });
+
+    it('falls back to scanning the head when the tail is dominated by tool output', async () => {
+        const originalCodexHome = process.env.CODEX_HOME;
+
+        const tmpRoot = await mkdtemp(join(os.tmpdir(), 'happy-cli-codex-preview-head-fallback-'));
+        try {
+            const projectDir = join(tmpRoot, 'project');
+            const sessionsDir = join(tmpRoot, 'sessions');
+            await mkdir(projectDir, { recursive: true });
+            await mkdir(sessionsDir, { recursive: true });
+
+            process.env.CODEX_HOME = tmpRoot;
+
+            const sessionId = '019bbb78-fd0a-7be1-b731-684e43c306cf';
+            const injectedAgents = '# AGENTS.md instructions for /path\n<INSTRUCTIONS>\nfoo\n</INSTRUCTIONS>';
+            const realPrompt = 'Codex please form a commit on this repo and push to origin.';
+
+            // Make the file larger than the tail scan window (1 MiB) by adding a big tool output.
+            const bigOutput = 'X'.repeat(1200 * 1024);
+
+            const rolloutFile = join(
+                sessionsDir,
+                'rollout-2026-01-15T00-00-00-00000000-0000-0000-0000-000000000000.jsonl'
+            );
+
+            await writeFile(
+                rolloutFile,
+                [
+                    JSON.stringify({
+                        type: 'session_meta',
+                        payload: {
+                            meta: {
+                                id: sessionId,
+                                cwd: projectDir,
+                                git: { branch: 'master' },
+                            },
+                        },
+                    }),
+                    JSON.stringify({
+                        type: 'event_msg',
+                        payload: { type: 'user_message', message: injectedAgents },
+                    }),
+                    JSON.stringify({
+                        type: 'event_msg',
+                        payload: { type: 'user_message', message: realPrompt },
+                    }),
+                    JSON.stringify({
+                        type: 'response_item',
+                        payload: {
+                            type: 'function_call_output',
+                            call_id: 'call_big',
+                            output: bigOutput,
+                        },
+                    }),
+                    JSON.stringify({
+                        type: 'response_item',
+                        payload: {
+                            type: 'message',
+                            role: 'assistant',
+                            content: [{ type: 'output_text', text: 'ok' }],
+                        },
+                    }),
+                ].join('\n') + '\n'
+            );
+
+            const entries = await listCodexResumeSessions({ workingDirectory: projectDir });
+            expect(entries).toHaveLength(1);
+            expect(entries[0]?.preview).toContain('Codex please form a commit');
+        } finally {
+            process.env.CODEX_HOME = originalCodexHome;
+            await rm(tmpRoot, { recursive: true, force: true });
+        }
+    });
 });

@@ -694,9 +694,15 @@ async function readTailPreviewMessage(file: string): Promise<string | undefined>
     // Prefer a preview from the most recent user message (Codex's own picker does this).
     // We intentionally avoid using the first user message since many environments inject
     // AGENTS.md content as the initial message, which makes the resume list useless.
-    const tail = await readTailBytes(file, 256 * 1024);
+    const maxScanBytes = 1024 * 1024; // 1 MiB per scan (keeps resume snappy even with huge tool outputs)
+
+    const fileStat = await statSafe(file);
+    const fileSize = fileStat?.size ?? null;
+
+    // First try the tail. This is usually where the most recent user messages live.
+    const tail = await readTailBytes(file, fileSize ? Math.min(fileSize, maxScanBytes) : maxScanBytes);
     if (!tail) return undefined;
-    const { lines } = splitLines(tail);
+    let { lines } = splitLines(tail);
 
     let latestAssistant: string | undefined;
 
@@ -715,25 +721,74 @@ async function readTailPreviewMessage(file: string): Promise<string | undefined>
             const payload = record?.payload;
             if (payload?.type === 'message' && Array.isArray(payload?.content)) {
                 const text = extractText(payload.content, payload?.role === 'assistant');
-                if (!text || looksLikeAgentsBootstrap(text)) continue;
+                const normalized = normalizePreview(text);
+                if (!normalized || looksLikeAgentsBootstrap(normalized)) continue;
                 if (payload?.role === 'user') {
-                    return text;
+                    return normalized;
                 }
                 if (!latestAssistant) {
-                    latestAssistant = text;
+                    latestAssistant = normalized;
                 }
             }
         } else if (itemType === 'event_msg') {
             const payload = record?.payload;
             if (payload?.type === 'user_message' && typeof payload?.message === 'string') {
-                const text = payload.message;
-                if (!text || looksLikeAgentsBootstrap(text)) continue;
-                return text;
+                const normalized = normalizePreview(payload.message);
+                if (!normalized || looksLikeAgentsBootstrap(normalized)) continue;
+                return normalized;
             }
             if (!latestAssistant && payload?.type === 'agent_message' && typeof payload?.message === 'string') {
-                const text = payload.message;
-                if (!text || looksLikeAgentsBootstrap(text)) continue;
-                latestAssistant = text;
+                const normalized = normalizePreview(payload.message);
+                if (!normalized || looksLikeAgentsBootstrap(normalized)) continue;
+                latestAssistant = normalized;
+            }
+        }
+    }
+
+    // If we didn't find any non-bootstrap user/assistant messages in the tail chunk, the session may
+    // have a huge amount of tool output that pushed the interesting messages near the start of the file.
+    // Fall back to scanning the head so the preview stays useful (matches how Codex's picker behaves).
+    if (fileSize && fileSize > maxScanBytes) {
+        const head = await readHeadBytes(file, Math.min(fileSize, maxScanBytes));
+        if (!head) return undefined;
+        ({ lines } = splitLines(head));
+
+        for (let i = lines.length - 1; i >= 0; i--) {
+            const line = lines[i];
+            if (!line?.trim()) continue;
+            let record: any;
+            try {
+                record = JSON.parse(line);
+            } catch {
+                continue;
+            }
+
+            const itemType = record?.type;
+            if (itemType === 'response_item') {
+                const payload = record?.payload;
+                if (payload?.type === 'message' && Array.isArray(payload?.content)) {
+                    const text = extractText(payload.content, payload?.role === 'assistant');
+                    const normalized = normalizePreview(text);
+                    if (!normalized || looksLikeAgentsBootstrap(normalized)) continue;
+                    if (payload?.role === 'user') {
+                        return normalized;
+                    }
+                    if (!latestAssistant) {
+                        latestAssistant = normalized;
+                    }
+                }
+            } else if (itemType === 'event_msg') {
+                const payload = record?.payload;
+                if (payload?.type === 'user_message' && typeof payload?.message === 'string') {
+                    const normalized = normalizePreview(payload.message);
+                    if (!normalized || looksLikeAgentsBootstrap(normalized)) continue;
+                    return normalized;
+                }
+                if (!latestAssistant && payload?.type === 'agent_message' && typeof payload?.message === 'string') {
+                    const normalized = normalizePreview(payload.message);
+                    if (!normalized || looksLikeAgentsBootstrap(normalized)) continue;
+                    latestAssistant = normalized;
+                }
             }
         }
     }
