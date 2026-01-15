@@ -89,6 +89,27 @@ export const CodexResumeSelector: React.FC<CodexResumeSelectorProps> = ({
     const maxUpdated = Math.max('Updated'.length, ...rows.map((row) => row.updated.length));
     const maxBranch = Math.max('Branch'.length, ...rows.map((row) => row.branch.length));
     const maxCwd = Math.max('CWD'.length, ...rows.map((row) => row.cwd.length));
+    const columns = stdout?.columns ?? null;
+    const maxPreviewWidth = useMemo(() => {
+        if (!columns) return MAX_PREVIEW;
+        // Row format:
+        // `${prefix} ${updated.padEnd(maxUpdated)}  ${branch.padEnd(maxBranch)} ${cwd.padEnd(maxCwd)} ${preview}`
+        // so everything before preview consumes a fixed number of terminal columns.
+        const prefixAndSpaces = 2; // "> "
+        const betweenUpdatedAndBranch = 2; // two spaces
+        const betweenBranchAndCwdOrPreview = 1; // one space
+        const cwdSegment = showAll ? maxCwd + 1 : 0; // plus trailing space
+        const beforePreview =
+            prefixAndSpaces
+            + maxUpdated
+            + betweenUpdatedAndBranch
+            + maxBranch
+            + betweenBranchAndCwdOrPreview
+            + cwdSegment;
+
+        // Leave at least a small preview so the UX isn't blank, and cap to a reasonable max.
+        return Math.min(MAX_PREVIEW, Math.max(10, columns - beforePreview));
+    }, [columns, maxBranch, maxCwd, maxUpdated, showAll]);
 
     const totalRows = rows.length;
     const usableRows = Math.max(5, (stdout?.rows ?? 24) - 6);
@@ -115,10 +136,11 @@ export const CodexResumeSelector: React.FC<CodexResumeSelectorProps> = ({
                         const absoluteIndex = start + index;
                         const selected = absoluteIndex === selectedIndex;
                         const prefix = selected ? '>' : ' ';
+                        const preview = truncate(row.preview, maxPreviewWidth);
                         return (
                             <Text key={row.entry.id} color={selected ? 'cyan' : undefined}>
                                 {prefix} {pad(row.updated, maxUpdated)}  {pad(row.branch, maxBranch)}{' '}
-                                {showAll ? `${pad(row.cwd, maxCwd)} ` : ''}{row.preview}
+                                {showAll ? `${pad(row.cwd, maxCwd)} ` : ''}{preview}
                             </Text>
                         );
                     })
