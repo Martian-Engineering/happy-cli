@@ -681,6 +681,19 @@ async function readHeadBytes(file: string, maxBytes: number): Promise<string | n
 
 function normalizePreview(text?: string): string | undefined {
     if (!text) return undefined;
-    const trimmed = text.replace(/\s+/g, ' ').trim();
+    const stripped = stripAnsiAndControls(text);
+    const trimmed = stripped.replace(/\s+/g, ' ').trim();
     return trimmed || undefined;
+}
+
+function stripAnsiAndControls(text: string): string {
+    // Preview text is user-controlled (extracted from JSONL). If it contains ANSI escape sequences
+    // or other control characters, it can break Ink rendering / terminal state. Sanitize aggressively.
+    const withoutAnsi = text.replace(
+        /(?:\u001B\][^\u0007]*(?:\u0007|\u001B\\))|(?:\u001B\[[0-?]*[ -/]*[@-~])|(?:\u009B[0-?]*[ -/]*[@-~])|(?:\u001B[@-Z\\-_])/g,
+        ''
+    );
+
+    // Replace remaining control characters with spaces (keeps word boundaries for later normalization).
+    return withoutAnsi.replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ');
 }
