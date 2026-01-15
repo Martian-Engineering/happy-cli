@@ -626,28 +626,12 @@ async function readSessionSummary(file: string): Promise<{
             cwd = payload?.cwd ?? meta?.cwd ?? cwd;
             gitBranch = payload?.git?.branch ?? meta?.git?.branch ?? gitBranch;
         }
-
-        if (!preview) {
-            if (record?.type === 'response_item') {
-                const payload = record?.payload;
-                if (payload?.type === 'message' && payload?.role === 'user' && Array.isArray(payload?.content)) {
-                    const text = extractText(payload.content, false);
-                    if (text) {
-                        preview = text;
-                    }
-                }
-            } else if (record?.type === 'event_msg') {
-                const payload = record?.payload;
-                if (payload?.type === 'user_message' && typeof payload?.message === 'string') {
-                    preview = payload.message;
-                }
-            }
-        }
-
-        if (id && preview) {
-            break;
-        }
     }
+
+    // Prefer a preview from the most recent message in the session, not the first.
+    // Many environments inject AGENTS.md as the first user message, which makes resume previews useless.
+    const tailPreview = await readTailPreviewMessage(file);
+    preview = tailPreview ?? preview;
 
     return { id, cwd, gitBranch, preview };
 }
@@ -677,6 +661,84 @@ async function readHeadBytes(file: string, maxBytes: number): Promise<string | n
     } finally {
         await handle?.close().catch(() => undefined);
     }
+}
+
+async function readTailBytes(file: string, maxBytes: number): Promise<string | null> {
+    let handle;
+    try {
+        handle = await open(file, 'r');
+        const stats = await handle.stat();
+        if (stats.size <= 0) return '';
+        const length = Math.min(stats.size, maxBytes);
+        const offset = Math.max(0, stats.size - length);
+        const buffer = Buffer.alloc(length);
+        await handle.read(buffer, 0, length, offset);
+        return buffer.toString('utf8');
+    } catch {
+        return null;
+    } finally {
+        await handle?.close().catch(() => undefined);
+    }
+}
+
+function looksLikeAgentsBootstrap(text: string): boolean {
+    const trimmed = text.trimStart();
+    return (
+        trimmed.startsWith('# AGENTS.md instructions') ||
+        trimmed.startsWith('AGENTS.md instructions') ||
+        trimmed.includes('<INSTRUCTIONS>')
+    );
+}
+
+async function readTailPreviewMessage(file: string): Promise<string | undefined> {
+    // Prefer a preview from the most recent user message (Codex's own picker does this).
+    // We intentionally avoid using the first user message since many environments inject
+    // AGENTS.md content as the initial message, which makes the resume list useless.
+    const tail = await readTailBytes(file, 256 * 1024);
+    if (!tail) return undefined;
+    const { lines } = splitLines(tail);
+
+    let latestAssistant: string | undefined;
+
+    for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        if (!line?.trim()) continue;
+        let record: any;
+        try {
+            record = JSON.parse(line);
+        } catch {
+            continue;
+        }
+
+        const itemType = record?.type;
+        if (itemType === 'response_item') {
+            const payload = record?.payload;
+            if (payload?.type === 'message' && Array.isArray(payload?.content)) {
+                const text = extractText(payload.content, payload?.role === 'assistant');
+                if (!text || looksLikeAgentsBootstrap(text)) continue;
+                if (payload?.role === 'user') {
+                    return text;
+                }
+                if (!latestAssistant) {
+                    latestAssistant = text;
+                }
+            }
+        } else if (itemType === 'event_msg') {
+            const payload = record?.payload;
+            if (payload?.type === 'user_message' && typeof payload?.message === 'string') {
+                const text = payload.message;
+                if (!text || looksLikeAgentsBootstrap(text)) continue;
+                return text;
+            }
+            if (!latestAssistant && payload?.type === 'agent_message' && typeof payload?.message === 'string') {
+                const text = payload.message;
+                if (!text || looksLikeAgentsBootstrap(text)) continue;
+                latestAssistant = text;
+            }
+        }
+    }
+
+    return latestAssistant;
 }
 
 function normalizePreview(text?: string): string | undefined {

@@ -70,4 +70,58 @@ describe('rolloutScanner preview sanitization', () => {
             await rm(tmpRoot, { recursive: true, force: true });
         }
     });
+
+    it('prefers the most recent meaningful user message (not injected AGENTS.md)', async () => {
+        const originalCodexHome = process.env.CODEX_HOME;
+
+        const tmpRoot = await mkdtemp(join(os.tmpdir(), 'happy-cli-codex-preview-latest-'));
+        try {
+            const projectDir = join(tmpRoot, 'project');
+            const sessionsDir = join(tmpRoot, 'sessions');
+            await mkdir(projectDir, { recursive: true });
+            await mkdir(sessionsDir, { recursive: true });
+
+            process.env.CODEX_HOME = tmpRoot;
+
+            const sessionId = '019bbb78-fd0a-7be1-b731-684e43c306cf';
+            const injectedAgents = '# AGENTS.md instructions for /path\n<INSTRUCTIONS>\nfoo\n</INSTRUCTIONS>';
+            const realPrompt = 'Please perform the same cleanup for undated-46740309.';
+
+            const rolloutFile = join(
+                sessionsDir,
+                'rollout-2026-01-15T00-00-00-00000000-0000-0000-0000-000000000000.jsonl'
+            );
+
+            await writeFile(
+                rolloutFile,
+                [
+                    JSON.stringify({
+                        type: 'session_meta',
+                        payload: {
+                            meta: {
+                                id: sessionId,
+                                cwd: projectDir,
+                                git: { branch: 'master' },
+                            },
+                        },
+                    }),
+                    JSON.stringify({
+                        type: 'event_msg',
+                        payload: { type: 'user_message', message: injectedAgents },
+                    }),
+                    JSON.stringify({
+                        type: 'event_msg',
+                        payload: { type: 'user_message', message: realPrompt },
+                    }),
+                ].join('\n') + '\n'
+            );
+
+            const entries = await listCodexResumeSessions({ workingDirectory: projectDir });
+            expect(entries).toHaveLength(1);
+            expect(entries[0]?.preview).toContain('Please perform the same cleanup');
+        } finally {
+            process.env.CODEX_HOME = originalCodexHome;
+            await rm(tmpRoot, { recursive: true, force: true });
+        }
+    });
 });
