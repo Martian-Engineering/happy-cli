@@ -121,6 +121,27 @@ import { execFileSync } from 'node:child_process'
           }
         }
       }
+
+      if (resumeArgs?.[0] === 'resume') {
+        const { extractResumeSessionId } = await import('@/codex/utils/resume');
+        const resumeSessionId = extractResumeSessionId(resumeArgs);
+        const wantsLast = resumeArgs.includes('--last');
+        const allowAll = resumeArgs.includes('--all');
+        if (resumeArgs.includes('--all')) {
+          resumeArgs = resumeArgs.filter((arg) => arg !== '--all');
+        }
+        if (!resumeSessionId && !wantsLast) {
+          const { selectCodexResumeSession } = await import('@/codex/utils/resumePicker');
+          const selection = await selectCodexResumeSession({
+            workingDirectory: process.cwd(),
+            allowAll,
+          });
+          if (!selection) {
+            return;
+          }
+          resumeArgs = ['resume', selection.id];
+        }
+      }
       
       const {
         credentials

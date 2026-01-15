@@ -15,6 +15,15 @@ interface RolloutScannerOptions {
     onActiveSessionFile?: (file: string, sessionId: string | undefined) => void;
 }
 
+export interface CodexResumeEntry {
+    id: string;
+    preview: string;
+    updatedAt?: Date;
+    cwd?: string;
+    gitBranch?: string;
+    path: string;
+}
+
 interface FileState {
     offset: number;
     buffer: string;
@@ -352,6 +361,55 @@ export async function findSessionFileById(sessionId: string): Promise<string | n
     return null;
 }
 
+export async function listCodexResumeSessions(opts: {
+    workingDirectory: string;
+    allowAll?: boolean;
+    limit?: number;
+}): Promise<CodexResumeEntry[]> {
+    const codexHomeDir = process.env.CODEX_HOME || join(os.homedir(), '.codex');
+    const sessionsDir = join(codexHomeDir, 'sessions');
+    const normalizedCwd = resolve(opts.workingDirectory);
+    const files = await listJsonlFiles(sessionsDir);
+
+    const scored = await Promise.all(
+        files.map(async (file) => {
+            const stats = await statSafe(file);
+            const parsedTs = parseRolloutTimestamp(file);
+            const ts = parsedTs ?? stats?.mtimeMs ?? 0;
+            return { file, ts, mtimeMs: stats?.mtimeMs ?? null };
+        })
+    );
+
+    scored.sort((a, b) => b.ts - a.ts);
+
+    const limit = opts.limit ?? 200;
+    const entries: CodexResumeEntry[] = [];
+
+    for (const candidate of scored) {
+        if (entries.length >= limit) break;
+        const summary = await readSessionSummary(candidate.file);
+        if (!summary?.id) continue;
+        if (!opts.allowAll) {
+            if (!summary.cwd) continue;
+            if (resolve(summary.cwd) !== normalizedCwd) continue;
+        }
+        const updatedAt = summary.updatedAt
+            ?? (candidate.mtimeMs ? new Date(candidate.mtimeMs) : undefined)
+            ?? (candidate.ts ? new Date(candidate.ts) : undefined);
+        const preview = normalizePreview(summary.preview);
+        entries.push({
+            id: summary.id,
+            preview: preview || '(no message yet)',
+            updatedAt,
+            cwd: summary.cwd,
+            gitBranch: summary.gitBranch,
+            path: candidate.file,
+        });
+    }
+
+    return entries;
+}
+
 export async function readSessionMeta(file: string): Promise<{ id?: string; cwd?: string } | null> {
     return readSessionMetaInternal(file);
 }
@@ -537,6 +595,63 @@ async function readSessionMetaInternal(file: string): Promise<{ id?: string; cwd
     return null;
 }
 
+async function readSessionSummary(file: string): Promise<{
+    id?: string;
+    cwd?: string;
+    gitBranch?: string;
+    preview?: string;
+    updatedAt?: Date;
+}> {
+    const head = await readHeadBytes(file, 64 * 1024);
+    if (!head) return {};
+    const { lines } = splitLines(head);
+    let id: string | undefined;
+    let cwd: string | undefined;
+    let gitBranch: string | undefined;
+    let preview: string | undefined;
+
+    for (const line of lines) {
+        if (!line.trim()) continue;
+        let record: any;
+        try {
+            record = JSON.parse(line);
+        } catch {
+            continue;
+        }
+
+        if (record?.type === 'session_meta') {
+            const payload = record?.payload ?? {};
+            const meta = payload?.meta ?? {};
+            id = payload?.id ?? meta?.id ?? id;
+            cwd = payload?.cwd ?? meta?.cwd ?? cwd;
+            gitBranch = payload?.git?.branch ?? meta?.git?.branch ?? gitBranch;
+        }
+
+        if (!preview) {
+            if (record?.type === 'response_item') {
+                const payload = record?.payload;
+                if (payload?.type === 'message' && payload?.role === 'user' && Array.isArray(payload?.content)) {
+                    const text = extractText(payload.content, false);
+                    if (text) {
+                        preview = text;
+                    }
+                }
+            } else if (record?.type === 'event_msg') {
+                const payload = record?.payload;
+                if (payload?.type === 'user_message' && typeof payload?.message === 'string') {
+                    preview = payload.message;
+                }
+            }
+        }
+
+        if (id && preview) {
+            break;
+        }
+    }
+
+    return { id, cwd, gitBranch, preview };
+}
+
 function parseRolloutTimestamp(file: string): number | null {
     const match = file.match(/rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-/);
     if (!match) return null;
@@ -545,4 +660,27 @@ function parseRolloutTimestamp(file: string): number | null {
     const date = new Date(`${iso}Z`);
     const ts = date.getTime();
     return Number.isNaN(ts) ? null : ts;
+}
+
+async function readHeadBytes(file: string, maxBytes: number): Promise<string | null> {
+    let handle;
+    try {
+        handle = await open(file, 'r');
+        const stats = await handle.stat();
+        if (stats.size <= 0) return '';
+        const length = Math.min(stats.size, maxBytes);
+        const buffer = Buffer.alloc(length);
+        await handle.read(buffer, 0, length, 0);
+        return buffer.toString('utf8');
+    } catch {
+        return null;
+    } finally {
+        await handle?.close().catch(() => undefined);
+    }
+}
+
+function normalizePreview(text?: string): string | undefined {
+    if (!text) return undefined;
+    const trimmed = text.replace(/\s+/g, ' ').trim();
+    return trimmed || undefined;
 }
