@@ -30,6 +30,9 @@ function getCodexMcpCommand(): string | null {
         const versionStr = match[1];
         const [major, minor, patch] = versionStr.split(/[-.]/).map(Number);
 
+        // Dev builds may report 0.0.0 but still require mcp-server.
+        if (major === 0 && minor === 0 && patch === 0) return 'mcp-server';
+
         // Version >= 0.43.0-alpha.5 has mcp-server
         if (major > 0 || minor > 43) return 'mcp-server';
         if (minor === 43 && patch === 0) {
