@@ -633,14 +633,8 @@ async function readSessionSummary(file: string): Promise<{
         }
 
         // Codex considers a rollout valid if it sees a user event in the head scan.
-        // We accept either the legacy `event_msg` form or the newer `response_item` user message.
+        // Codex's `list_threads` uses the presence of a `user_message` event (not a `response_item`).
         if (record?.type === 'event_msg' && record?.payload?.type === 'user_message') {
-            sawUserEvent = true;
-        } else if (
-            record?.type === 'response_item' &&
-            record?.payload?.type === 'message' &&
-            record?.payload?.role === 'user'
-        ) {
             sawUserEvent = true;
         }
     }

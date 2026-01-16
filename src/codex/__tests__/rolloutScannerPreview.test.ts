@@ -47,12 +47,8 @@ describe('rolloutScanner preview sanitization', () => {
                         },
                     }),
                     JSON.stringify({
-                        type: 'response_item',
-                        payload: {
-                            type: 'message',
-                            role: 'user',
-                            content: [{ type: 'input_text', text: rawMessage }],
-                        },
+                        type: 'event_msg',
+                        payload: { type: 'user_message', message: rawMessage },
                     }),
                 ].join('\n') + '\n'
             );
@@ -252,6 +248,72 @@ describe('rolloutScanner preview sanitization', () => {
                     payload: { type: 'user_message', message: 'this is too late' },
                 })
             );
+
+            await writeFile(rolloutFile, records.join('\n') + '\n');
+
+            const entries = await listCodexResumeSessions({ workingDirectory: projectDir });
+            expect(entries).toHaveLength(0);
+        } finally {
+            process.env.CODEX_HOME = originalCodexHome;
+            await rm(tmpRoot, { recursive: true, force: true });
+        }
+    });
+
+    it('matches Codex filtering: excludes rollouts that only have response_item user messages (no user_message event)', async () => {
+        const originalCodexHome = process.env.CODEX_HOME;
+
+        const tmpRoot = await mkdtemp(join(os.tmpdir(), 'happy-cli-codex-preview-event-msg-only-'));
+        try {
+            const projectDir = join(tmpRoot, 'project');
+            const sessionsDir = join(tmpRoot, 'sessions');
+            await mkdir(projectDir, { recursive: true });
+            await mkdir(sessionsDir, { recursive: true });
+
+            process.env.CODEX_HOME = tmpRoot;
+
+            const sessionId = '019bbb78-fd0a-7be1-b731-684e43c306cf';
+
+            const rolloutFile = join(
+                sessionsDir,
+                'rollout-2026-01-15T00-00-00-00000000-0000-0000-0000-000000000000.jsonl'
+            );
+
+            // First 10 records include a user message as a response_item, but there is NO event_msg:user_message.
+            // Codex excludes these from its resume list.
+            const records: string[] = [
+                JSON.stringify({
+                    type: 'session_meta',
+                    payload: {
+                        meta: {
+                            id: sessionId,
+                            cwd: projectDir,
+                            git: { branch: 'master' },
+                        },
+                    },
+                }),
+                JSON.stringify({
+                    type: 'response_item',
+                    payload: {
+                        type: 'message',
+                        role: 'user',
+                        content: [{ type: 'input_text', text: 'hello from response_item' }],
+                    },
+                }),
+            ];
+
+            // Pad to 10 total records with assistant messages
+            while (records.length < 10) {
+                records.push(
+                    JSON.stringify({
+                        type: 'response_item',
+                        payload: {
+                            type: 'message',
+                            role: 'assistant',
+                            content: [{ type: 'output_text', text: 'ok' }],
+                        },
+                    })
+                );
+            }
 
             await writeFile(rolloutFile, records.join('\n') + '\n');
 
