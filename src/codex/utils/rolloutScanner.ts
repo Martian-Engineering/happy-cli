@@ -389,6 +389,9 @@ export async function listCodexResumeSessions(opts: {
         if (entries.length >= limit) break;
         const summary = await readSessionSummary(candidate.file);
         if (!summary?.id) continue;
+        // Match Codex's `list_threads`: only include sessions that have
+        // session metadata AND a user event within the head-record scan window.
+        if (!summary.sawSessionMeta || !summary.sawUserEvent) continue;
         if (!opts.allowAll) {
             if (!summary.cwd) continue;
             if (resolve(summary.cwd) !== normalizedCwd) continue;
@@ -601,38 +604,52 @@ async function readSessionSummary(file: string): Promise<{
     gitBranch?: string;
     preview?: string;
     updatedAt?: Date;
+    sawSessionMeta: boolean;
+    sawUserEvent: boolean;
 }> {
     const head = await readHeadBytes(file, 1024 * 1024);
-    if (!head) return {};
+    if (!head) return { sawSessionMeta: false, sawUserEvent: false };
     const { lines } = splitLines(head);
     let id: string | undefined;
     let cwd: string | undefined;
     let gitBranch: string | undefined;
     let preview: string | undefined;
+    let sawSessionMeta = false;
+    let sawUserEvent = false;
 
-    for (const line of lines) {
-        if (!line.trim()) continue;
-        let record: any;
-        try {
-            record = JSON.parse(line);
-        } catch {
-            continue;
-        }
+    // Mirror Codex's head scan behavior: only consider the first N JSONL records.
+    // Codex uses this to decide which rollouts are "real" resumable threads.
+    const headRecords = parseHeadRecords(lines, 10);
 
+    for (const record of headRecords) {
         if (record?.type === 'session_meta') {
             const payload = record?.payload ?? {};
             const meta = payload?.meta ?? {};
             id = payload?.id ?? meta?.id ?? id;
             cwd = payload?.cwd ?? meta?.cwd ?? cwd;
             gitBranch = payload?.git?.branch ?? meta?.git?.branch ?? gitBranch;
+            sawSessionMeta = true;
+            continue;
+        }
+
+        // Codex considers a rollout valid if it sees a user event in the head scan.
+        // We accept either the legacy `event_msg` form or the newer `response_item` user message.
+        if (record?.type === 'event_msg' && record?.payload?.type === 'user_message') {
+            sawUserEvent = true;
+        } else if (
+            record?.type === 'response_item' &&
+            record?.payload?.type === 'message' &&
+            record?.payload?.role === 'user'
+        ) {
+            sawUserEvent = true;
         }
     }
 
     // Match Codex's picker: use the first meaningful user input as the preview.
     // Skip AGENTS.md bootstrap and other non-user prompts like <environment_context>.
-    preview = readHeadPreviewMessage(lines);
+    preview = readHeadPreviewMessageFromRecords(headRecords);
 
-    return { id, cwd, gitBranch, preview };
+    return { id, cwd, gitBranch, preview, sawSessionMeta, sawUserEvent };
 }
 
 function parseRolloutTimestamp(file: string): number | null {
@@ -704,6 +721,48 @@ function readHeadPreviewMessage(lines: string[]): string | undefined {
             continue;
         }
 
+        const itemType = record?.type;
+        if (itemType === 'response_item') {
+            const payload = record?.payload;
+            if (payload?.type === 'message' && payload?.role === 'user' && Array.isArray(payload?.content)) {
+                const raw = extractText(payload.content, false);
+                const normalized = normalizePreview(raw);
+                if (!normalized) continue;
+                if (looksLikeAgentsBootstrap(normalized)) continue;
+                if (looksLikeEnvironmentBootstrap(normalized)) continue;
+                return normalized;
+            }
+        } else if (itemType === 'event_msg') {
+            const payload = record?.payload;
+            if (payload?.type === 'user_message' && typeof payload?.message === 'string') {
+                const normalized = normalizePreview(payload.message);
+                if (!normalized) continue;
+                if (looksLikeAgentsBootstrap(normalized)) continue;
+                if (looksLikeEnvironmentBootstrap(normalized)) continue;
+                return normalized;
+            }
+        }
+    }
+
+    return undefined;
+}
+
+function parseHeadRecords(lines: string[], maxRecords: number): any[] {
+    const records: any[] = [];
+    for (const line of lines) {
+        if (records.length >= maxRecords) break;
+        if (!line.trim()) continue;
+        try {
+            records.push(JSON.parse(line));
+        } catch {
+            continue;
+        }
+    }
+    return records;
+}
+
+function readHeadPreviewMessageFromRecords(records: any[]): string | undefined {
+    for (const record of records) {
         const itemType = record?.type;
         if (itemType === 'response_item') {
             const payload = record?.payload;

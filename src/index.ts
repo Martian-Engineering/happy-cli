@@ -135,9 +135,6 @@ import { execFileSync } from 'node:child_process'
           const selection = await selectCodexResumeSession({
             workingDirectory: process.cwd(),
             allowAll,
-            // Match Codex's `codex resume` UX: by default, show the most recent session for this cwd.
-            // Users can pass `--all` to browse older sessions.
-            limit: allowAll ? 200 : 1,
           });
           if (!selection) {
             return;
