@@ -602,7 +602,7 @@ async function readSessionSummary(file: string): Promise<{
     preview?: string;
     updatedAt?: Date;
 }> {
-    const head = await readHeadBytes(file, 64 * 1024);
+    const head = await readHeadBytes(file, 1024 * 1024);
     if (!head) return {};
     const { lines } = splitLines(head);
     let id: string | undefined;
@@ -628,10 +628,9 @@ async function readSessionSummary(file: string): Promise<{
         }
     }
 
-    // Prefer a preview from the most recent message in the session, not the first.
-    // Many environments inject AGENTS.md as the first user message, which makes resume previews useless.
-    const tailPreview = await readTailPreviewMessage(file);
-    preview = tailPreview ?? preview;
+    // Match Codex's picker: use the first meaningful user input as the preview.
+    // Skip AGENTS.md bootstrap and other non-user prompts like <environment_context>.
+    preview = readHeadPreviewMessage(lines);
 
     return { id, cwd, gitBranch, preview };
 }
@@ -690,25 +689,14 @@ function looksLikeAgentsBootstrap(text: string): boolean {
     );
 }
 
-async function readTailPreviewMessage(file: string): Promise<string | undefined> {
-    // Prefer a preview from the most recent user message (Codex's own picker does this).
-    // We intentionally avoid using the first user message since many environments inject
-    // AGENTS.md content as the initial message, which makes the resume list useless.
-    const maxScanBytes = 1024 * 1024; // 1 MiB per scan (keeps resume snappy even with huge tool outputs)
+function looksLikeEnvironmentBootstrap(text: string): boolean {
+    const trimmed = text.trimStart();
+    return trimmed.startsWith('<environment_context>');
+}
 
-    const fileStat = await statSafe(file);
-    const fileSize = fileStat?.size ?? null;
-
-    // First try the tail. This is usually where the most recent user messages live.
-    const tail = await readTailBytes(file, fileSize ? Math.min(fileSize, maxScanBytes) : maxScanBytes);
-    if (!tail) return undefined;
-    let { lines } = splitLines(tail);
-
-    let latestAssistant: string | undefined;
-
-    for (let i = lines.length - 1; i >= 0; i--) {
-        const line = lines[i];
-        if (!line?.trim()) continue;
+function readHeadPreviewMessage(lines: string[]): string | undefined {
+    for (const line of lines) {
+        if (!line.trim()) continue;
         let record: any;
         try {
             record = JSON.parse(line);
@@ -719,81 +707,27 @@ async function readTailPreviewMessage(file: string): Promise<string | undefined>
         const itemType = record?.type;
         if (itemType === 'response_item') {
             const payload = record?.payload;
-            if (payload?.type === 'message' && Array.isArray(payload?.content)) {
-                const text = extractText(payload.content, payload?.role === 'assistant');
-                const normalized = normalizePreview(text);
-                if (!normalized || looksLikeAgentsBootstrap(normalized)) continue;
-                if (payload?.role === 'user') {
-                    return normalized;
-                }
-                if (!latestAssistant) {
-                    latestAssistant = normalized;
-                }
+            if (payload?.type === 'message' && payload?.role === 'user' && Array.isArray(payload?.content)) {
+                const raw = extractText(payload.content, false);
+                const normalized = normalizePreview(raw);
+                if (!normalized) continue;
+                if (looksLikeAgentsBootstrap(normalized)) continue;
+                if (looksLikeEnvironmentBootstrap(normalized)) continue;
+                return normalized;
             }
         } else if (itemType === 'event_msg') {
             const payload = record?.payload;
             if (payload?.type === 'user_message' && typeof payload?.message === 'string') {
                 const normalized = normalizePreview(payload.message);
-                if (!normalized || looksLikeAgentsBootstrap(normalized)) continue;
+                if (!normalized) continue;
+                if (looksLikeAgentsBootstrap(normalized)) continue;
+                if (looksLikeEnvironmentBootstrap(normalized)) continue;
                 return normalized;
             }
-            if (!latestAssistant && payload?.type === 'agent_message' && typeof payload?.message === 'string') {
-                const normalized = normalizePreview(payload.message);
-                if (!normalized || looksLikeAgentsBootstrap(normalized)) continue;
-                latestAssistant = normalized;
-            }
         }
     }
 
-    // If we didn't find any non-bootstrap user/assistant messages in the tail chunk, the session may
-    // have a huge amount of tool output that pushed the interesting messages near the start of the file.
-    // Fall back to scanning the head so the preview stays useful (matches how Codex's picker behaves).
-    if (fileSize && fileSize > maxScanBytes) {
-        const head = await readHeadBytes(file, Math.min(fileSize, maxScanBytes));
-        if (!head) return undefined;
-        ({ lines } = splitLines(head));
-
-        for (let i = lines.length - 1; i >= 0; i--) {
-            const line = lines[i];
-            if (!line?.trim()) continue;
-            let record: any;
-            try {
-                record = JSON.parse(line);
-            } catch {
-                continue;
-            }
-
-            const itemType = record?.type;
-            if (itemType === 'response_item') {
-                const payload = record?.payload;
-                if (payload?.type === 'message' && Array.isArray(payload?.content)) {
-                    const text = extractText(payload.content, payload?.role === 'assistant');
-                    const normalized = normalizePreview(text);
-                    if (!normalized || looksLikeAgentsBootstrap(normalized)) continue;
-                    if (payload?.role === 'user') {
-                        return normalized;
-                    }
-                    if (!latestAssistant) {
-                        latestAssistant = normalized;
-                    }
-                }
-            } else if (itemType === 'event_msg') {
-                const payload = record?.payload;
-                if (payload?.type === 'user_message' && typeof payload?.message === 'string') {
-                    const normalized = normalizePreview(payload.message);
-                    if (!normalized || looksLikeAgentsBootstrap(normalized)) continue;
-                    return normalized;
-                }
-                if (!latestAssistant && payload?.type === 'agent_message' && typeof payload?.message === 'string') {
-                    const normalized = normalizePreview(payload.message);
-                    if (!normalized || looksLikeAgentsBootstrap(normalized)) continue;
-                    latestAssistant = normalized;
-                }
-            }
-        }
-    }
-
-    return latestAssistant;
+    return undefined;
 }
 
 function normalizePreview(text?: string): string | undefined {

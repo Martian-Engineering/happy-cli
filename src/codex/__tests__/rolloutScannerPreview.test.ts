@@ -71,7 +71,7 @@ describe('rolloutScanner preview sanitization', () => {
         }
     });
 
-    it('prefers the most recent meaningful user message (not injected AGENTS.md)', async () => {
+    it('uses the first meaningful user message (not injected AGENTS.md)', async () => {
         const originalCodexHome = process.env.CODEX_HOME;
 
         const tmpRoot = await mkdtemp(join(os.tmpdir(), 'happy-cli-codex-preview-latest-'));
@@ -125,7 +125,7 @@ describe('rolloutScanner preview sanitization', () => {
         }
     });
 
-    it('falls back to scanning the head when the tail is dominated by tool output', async () => {
+    it('keeps the preview stable even when later lines include huge tool output', async () => {
         const originalCodexHome = process.env.CODEX_HOME;
 
         const tmpRoot = await mkdtemp(join(os.tmpdir(), 'happy-cli-codex-preview-head-fallback-'));
@@ -141,7 +141,7 @@ describe('rolloutScanner preview sanitization', () => {
             const injectedAgents = '# AGENTS.md instructions for /path\n<INSTRUCTIONS>\nfoo\n</INSTRUCTIONS>';
             const realPrompt = 'Codex please form a commit on this repo and push to origin.';
 
-            // Make the file larger than the tail scan window (1 MiB) by adding a big tool output.
+            // Make the file large by adding a big tool output after the user's prompt.
             const bigOutput = 'X'.repeat(1200 * 1024);
 
             const rolloutFile = join(
