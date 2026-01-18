@@ -2,6 +2,7 @@ import React, { useMemo, useState, useEffect } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 
 import type { CodexResumeEntry } from '@/codex/utils/rolloutScanner';
+import { sanitizeInkText, truncateInkText } from '@/utils/inkSanitize';
 
 interface CodexResumeSelectorProps {
     entries: CodexResumeEntry[];
@@ -22,22 +23,27 @@ export const CodexResumeSelector: React.FC<CodexResumeSelectorProps> = ({
     const [selectedIndex, setSelectedIndex] = useState(0);
     const { stdout } = useStdout();
 
+    const safeEntries = useMemo(() => {
+        return entries.map((entry) => ({
+            entry,
+            preview: sanitizeInkText(entry.preview ?? ''),
+            branch: sanitizeInkText(entry.gitBranch ?? '-'),
+            cwd: sanitizeInkText(entry.cwd ?? '-'),
+            id: sanitizeInkText(entry.id ?? ''),
+        }));
+    }, [entries]);
+
     const filtered = useMemo(() => {
-        const normalized = query.trim().toLowerCase();
-        if (!normalized) return entries;
-        return entries.filter((entry) => {
-            const haystack = [
-                entry.preview,
-                entry.gitBranch,
-                entry.cwd,
-                entry.id,
-            ]
+        const normalized = sanitizeInkText(query).toLowerCase();
+        if (!normalized) return safeEntries;
+        return safeEntries.filter((item) => {
+            const haystack = [item.preview, item.branch, item.cwd, item.id]
                 .filter(Boolean)
                 .join(' ')
                 .toLowerCase();
             return haystack.includes(normalized);
         });
-    }, [entries, query]);
+    }, [safeEntries, query]);
 
     useEffect(() => {
         if (selectedIndex >= filtered.length) {
@@ -57,7 +63,7 @@ export const CodexResumeSelector: React.FC<CodexResumeSelectorProps> = ({
         if (key.return) {
             const entry = filtered[selectedIndex];
             if (entry) {
-                onSelect(entry);
+                onSelect(entry.entry);
             }
             return;
         }
@@ -77,12 +83,10 @@ export const CodexResumeSelector: React.FC<CodexResumeSelectorProps> = ({
     });
 
     const rows = useMemo(() => {
-        return filtered.map((entry) => {
-            const updated = formatRelativeTime(entry.updatedAt);
-            const branch = entry.gitBranch ?? '-';
-            const cwd = entry.cwd ?? '-';
-            const preview = truncate(entry.preview, MAX_PREVIEW);
-            return { entry, updated, branch, cwd, preview };
+        return filtered.map((item) => {
+            const updated = formatRelativeTime(item.entry.updatedAt);
+            const preview = truncateInkText(item.preview, MAX_PREVIEW);
+            return { entry: item.entry, updated, branch: item.branch, cwd: item.cwd, preview };
         });
     }, [filtered]);
 
@@ -122,7 +126,7 @@ export const CodexResumeSelector: React.FC<CodexResumeSelectorProps> = ({
     return (
         <Box flexDirection="column" paddingY={1}>
             <Text color="cyan">Resume a previous session</Text>
-            <Text dimColor>{query ? `Search: ${query}` : 'Type to search'}</Text>
+            <Text dimColor>{query ? `Search: ${sanitizeInkText(query)}` : 'Type to search'}</Text>
 
             <Box marginTop={1} flexDirection="column">
                 <Text>
@@ -136,7 +140,7 @@ export const CodexResumeSelector: React.FC<CodexResumeSelectorProps> = ({
                         const absoluteIndex = start + index;
                         const selected = absoluteIndex === selectedIndex;
                         const prefix = selected ? '>' : ' ';
-                        const preview = truncate(row.preview, maxPreviewWidth);
+                        const preview = truncateInkText(row.preview, maxPreviewWidth);
                         return (
                             <Text key={row.entry.id} color={selected ? 'cyan' : undefined}>
                                 {prefix} {pad(row.updated, maxUpdated)}  {pad(row.branch, maxBranch)}{' '}
@@ -153,12 +157,6 @@ export const CodexResumeSelector: React.FC<CodexResumeSelectorProps> = ({
         </Box>
     );
 };
-
-function truncate(text: string, max: number): string {
-    if (!text) return '';
-    if (text.length <= max) return text;
-    return `${text.slice(0, Math.max(0, max - 3))}...`;
-}
 
 function pad(value: string, width: number): string {
     if (value.length >= width) return value;

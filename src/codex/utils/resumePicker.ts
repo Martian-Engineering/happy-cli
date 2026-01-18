@@ -44,31 +44,59 @@ export async function selectCodexResumeSession(opts: {
     return await new Promise((resolve) => {
         let hasResolved = false;
         const restoreScreen = enterAltScreen(process.stdout);
+        let app: ReturnType<typeof render> | null = null;
+
+        const cleanupSignals: Array<() => void> = [];
+        const registerSignal = (signal: NodeJS.Signals, handler: () => void) => {
+            process.once(signal, handler);
+            cleanupSignals.push(() => process.removeListener(signal, handler));
+        };
+
+        const cleanup = () => {
+            cleanupSignals.forEach((fn) => fn());
+            if (app) {
+                app.unmount();
+            }
+            restoreScreen();
+        };
 
         const onSelect = (entry: CodexResumeEntry) => {
             if (hasResolved) return;
             hasResolved = true;
-            app.unmount();
-            restoreScreen();
+            cleanup();
             resolve(entry);
         };
 
         const onCancel = () => {
             if (hasResolved) return;
             hasResolved = true;
-            app.unmount();
-            restoreScreen();
+            cleanup();
             resolve(null);
         };
 
-        const app = render(
-            React.createElement(CodexResumeSelector, {
-                entries,
-                showAll: Boolean(opts.allowAll),
-                onSelect,
-                onCancel,
-            }),
-            { exitOnCtrlC: false, patchConsole: false }
-        );
+        const onSignal = () => {
+            if (hasResolved) return;
+            hasResolved = true;
+            cleanup();
+            resolve(null);
+        };
+
+        registerSignal('SIGINT', onSignal);
+        registerSignal('SIGTERM', onSignal);
+
+        try {
+            app = render(
+                React.createElement(CodexResumeSelector, {
+                    entries,
+                    showAll: Boolean(opts.allowAll),
+                    onSelect,
+                    onCancel,
+                }),
+                { exitOnCtrlC: false, patchConsole: false }
+            );
+        } catch (error) {
+            cleanup();
+            throw error;
+        }
     });
 }

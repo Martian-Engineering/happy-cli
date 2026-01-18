@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { logger } from '@/ui/logger';
 import { InvalidateSync } from '@/utils/sync';
 import { startFileWatcher } from '@/modules/watcher/startFileWatcher';
+import { sanitizeInkText } from '@/utils/inkSanitize';
 
 interface RolloutScannerOptions {
     workingDirectory: string;
@@ -785,19 +786,8 @@ function readHeadPreviewMessageFromRecords(records: any[]): string | undefined {
 
 function normalizePreview(text?: string): string | undefined {
     if (!text) return undefined;
-    const stripped = stripAnsiAndControls(text);
-    const trimmed = stripped.replace(/\s+/g, ' ').trim();
-    return trimmed || undefined;
+    const sanitized = sanitizeInkText(text);
+    return sanitized || undefined;
 }
 
-function stripAnsiAndControls(text: string): string {
-    // Preview text is user-controlled (extracted from JSONL). If it contains ANSI escape sequences
-    // or other control characters, it can break Ink rendering / terminal state. Sanitize aggressively.
-    const withoutAnsi = text.replace(
-        /(?:\u001B\][^\u0007]*(?:\u0007|\u001B\\))|(?:\u001B\[[0-?]*[ -/]*[@-~])|(?:\u009B[0-?]*[ -/]*[@-~])|(?:\u001B[@-Z\\-_])/g,
-        ''
-    );
-
-    // Replace remaining control characters with spaces (keeps word boundaries for later normalization).
-    return withoutAnsi.replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ');
-}
+// stripAnsiAndControls replaced by sanitizeInkText
